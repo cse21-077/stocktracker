@@ -1,26 +1,40 @@
+// File: app/api/ticker/[id]/route.ts
+
 import { PrismaClient } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 const prisma = new PrismaClient();
 
+/**
+ * Updates a ticker event.
+ *
+ * Note: The second argument is typed to match the expected type,
+ *       i.e. an object with a promise for its params.
+ */
 export async function PUT(
   req: Request,
-  context: { params: { id: string } } // Explicitly define the context type
+  context: { params: Promise<{ id: string | string[] }> } // Updated type: params is a Promise
 ) {
   try {
-    // Validate id
-    const id = Number(context.params.id); // Access params via context
+    // Await the params since they are provided as a Promise.
+    const { id: idParam } = await context.params;
+
+    // If idParam is an array, use the first element (normally it should be a string)
+    const idValue = Array.isArray(idParam) ? idParam[0] : idParam;
+
+    // Convert the id to a number and validate
+    const id = Number(idValue);
     if (isNaN(id)) {
       return NextResponse.json({ error: "Invalid ID format" }, { status: 400 });
     }
 
-    // Parse request body
+    // Parse the request body
     const body = await req.json();
     if (!body || typeof body !== "object") {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    // Ensure only allowed fields are updated
+    // Only allow certain fields to be updated
     const allowedFields = ["totalImpliedVol", "cleanImpliedVol", "dirtyVolume", "vol"];
     const dataToUpdate = Object.keys(body)
       .filter((key) => allowedFields.includes(key))
@@ -30,7 +44,7 @@ export async function PUT(
       return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
     }
 
-    // Update the TickerEvent record
+    // Update the ticker event in the database
     const updatedEvent = await prisma.tickerEvent.update({
       where: { id },
       data: dataToUpdate,
@@ -40,6 +54,7 @@ export async function PUT(
   } catch (error: unknown) {
     console.error("Error updating event:", error);
 
+    // Handle the Prisma "not found" error code
     if (error instanceof Error && "code" in error && error.code === "P2025") {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
