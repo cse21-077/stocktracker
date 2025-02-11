@@ -1,0 +1,26 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+model TickerEvent {
+  id              Int      @id @default(autoincrement())
+  ticker          String
+  eventDate       DateTime
+  eventName       String
+  eventType       String   // "earnings", "dividend", "split", "m&a", "economic"
+  impact          String?  // "High", "Medium", "Low" - Ensure consistency with FinancialEvent
+  details         Json?    // Additional API data (EPS, split ratio, etc.)
+  totalImpliedVol Float?
+  cleanImpliedVol Float?
+  dirtyVolume     Float?
+  vol             Float?
+  createdAt       DateTime @default(now())
+  @@unique([ticker, eventDate]) // Define a composite unique constraint
+  @@map("ticker_events")
+}
+
