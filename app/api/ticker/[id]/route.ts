@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 
 const prisma = new PrismaClient();
 
-export async function PUT(req: Request, { params }: { params: { id: string } }) {
+export async function PUT(
+  req: Request,
+  { params }: { params: { id: string } } // Corrected type definition
+) {
   try {
     // Validate id
     const id = Number(params.id);
@@ -13,7 +16,7 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
 
     // Parse request body
     const body = await req.json();
-    if (!body) {
+    if (!body || typeof body !== "object") {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
 
@@ -32,7 +35,7 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
   } catch (error: unknown) {
     console.error("Error updating event:", error);
 
-    if (error instanceof Error && "code" in error && (error).code === "P2025") {
+    if (error instanceof Error && "code" in error && error.code === "P2025") {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
