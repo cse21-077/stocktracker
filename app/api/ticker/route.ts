@@ -1,246 +1,324 @@
+import { NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import csvParser from 'csv-parser';
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
-import { NextResponse } from 'next/server';
+import { parse } from 'date-fns';
 
 const prisma = new PrismaClient();
-const FMP_API_KEY = process.env.FMP_API_KEY;
-const BASE_URL = 'https://financialmodelingprep.com/api/v3';
 
-if (!FMP_API_KEY) {
-    throw new Error('FMP_API_KEY environment variable is not set.');
+// Define a Stock interface.
+interface Stock {
+  symbol: string;
+  name: string;
+  currency: string;
 }
 
-// -------------------- Helper Functions --------------------
+// Popular stocks constant
+const POPULAR_STOCKS: string[] = ["TSLA", "AAPL", "GOOGL", "MSFT", "AMZN", "NVDA"];
 
-// Fetch all tickers from the external API
-async function fetchTickers() {
-    try {
-        const response = await axios.get(`${BASE_URL}/stock/list?apikey=${FMP_API_KEY}`);
-        return response.data
-            .filter((ticker: any) => ticker.symbol && ticker.currency)
-            .map((ticker: any) => ({
-                symbol: ticker.symbol,
-                currency: ticker.currency,
-            }));
-    } catch (error: any) {
-        console.error(`Error fetching tickers: ${error.response?.status} - ${error.message}`);
-        return [];
-    }
-}
+// Fetch the full stock list from the FMP General Search API
+async function fetchStockList(): Promise<Stock[]> {
+  const BASE_URL = process.env.FMP_API_BASE_URL || 'https://financialmodelingprep.com/api/v3';
+  const FMP_API_KEY = process.env.FMP_API_KEY;
 
-// Fetch economic events from the external API
-async function fetchEconomicEvents() {
-    try {
-        const response = await axios.get(`${BASE_URL}/economic_calendar?apikey=${FMP_API_KEY}`);
-        return response.data || [];
-    } catch (error: any) {
-        console.error(`Error fetching economic events: ${error.response?.status} - ${error.message}`);
-        return [];
-    }
-}
+  if (!FMP_API_KEY) {
+    console.error('Missing API key for Financial Modeling Prep.');
+    return [];
+  }
 
-// Fetch stock-specific events (dividends, earnings, splits, mergers) for each ticker
-async function fetchAllStockEvents(tickers: { symbol: string }[]) {
-    const stockEvents: { [key: string]: any } = {};
-
-    await Promise.all(
-        tickers.map(async (ticker) => {
-            try {
-                const [dividends, earnings, splits, mergers] = await Promise.all([
-                    axios
-                        .get(`${BASE_URL}/historical/stock_dividend/${ticker.symbol}?apikey=${FMP_API_KEY}`)
-                        .catch(() => ({ data: [] })),
-                    axios
-                        .get(`${BASE_URL}/historical/earnings_calendar/${ticker.symbol}?apikey=${FMP_API_KEY}`)
-                        .catch(() => ({ data: [] })),
-                    axios
-                        .get(`${BASE_URL}/stock_split_calendar/${ticker.symbol}?apikey=${FMP_API_KEY}`)
-                        .catch(() => ({ data: [] })),
-                    axios
-                        .get(`${BASE_URL}/merger_acquisition?apikey=${FMP_API_KEY}`)
-                        .catch(() => ({ data: [] })),
-                ]);
-
-                stockEvents[ticker.symbol] = {
-                    dividends: dividends.data || [],
-                    earnings: earnings.data || [],
-                    splits: splits.data || [],
-                    // Only include mergers for the current ticker.
-                    mergers: mergers.data.filter((m: any) => m.symbol === ticker.symbol),
-                };
-            } catch (error) {
-                console.error(`Error fetching stock events for ${ticker.symbol}:`, error);
-            }
-        })
+  try {
+    const responses = await Promise.all(
+      POPULAR_STOCKS.map(async (ticker) => {
+        const response = await axios.get(`${BASE_URL}/search?query=${ticker}&apikey=${FMP_API_KEY}`);
+        return response.data;
+      })
     );
 
-    return stockEvents;
-}
-
-// Simple impact calculation helper
-function determineImpact(value: any): string {
-    if (typeof value === 'number') {
-        return value > 1 ? 'High' : value > 0.5 ? 'Medium' : 'Low';
-    }
-    return value === 'High' ? 'High' : 'Medium';
-}
-
-// Combine economic and stock events into a unified array
-function processEvents(tickers: { symbol: string; currency: string }[], economicEvents: any[], stockEvents: { [key: string]: any }) {
-    return tickers.flatMap((ticker) => {
-        const events: any[] = [];
-
-        // Process economic events for matching currency
-        economicEvents
-            .filter((event) => event.currency === ticker.currency)
-            .forEach((event) => {
-                events.push({
-                    ticker: ticker.symbol,
-                    eventDate: new Date(event.date),
-                    eventName: event.event,
-                    eventType: 'Economic',
-                    impact: event.impact || determineImpact(event.importance),
-                    details: {
-                        currency: ticker.currency,
-                        event: event.event
-                    }
-                });
-            });
-
-        // Process stock-specific events
-        const stockData = stockEvents[ticker.symbol];
-        if (stockData) {
-            // Process dividends
-            events.push(
-                ...stockData.dividends.map((dividend: any) => ({
-                    ticker: ticker.symbol,
-                    eventDate: new Date(dividend.date),
-                    eventName: `Dividend Payment: ${dividend.dividend}`,
-                    eventType: 'Dividend',
-                    impact: determineImpact(dividend.dividend),
-                    details: dividend
-                })),
-                // Process earnings
-                ...stockData.earnings.map((earning: any) => ({
-                    ticker: ticker.symbol,
-                    eventDate: new Date(earning.date),
-                    eventName: `Earnings Report`,
-                    eventType: 'Earnings',
-                    impact: determineImpact(earning.eps - earning.epsEstimated),
-                    details: {
-                        eps: earning.eps,
-                        epsEstimated: earning.epsEstimated,
-                        revenue: earning.revenue,
-                        revenueEstimated: earning.revenueEstimated,
-                    }
-                })),
-                // Process splits
-                ...stockData.splits.map((split: any) => ({
-                    ticker: ticker.symbol,
-                    eventDate: new Date(split.date),
-                    eventName: `Stock Split ${split.numerator}:${split.denominator}`,
-                    eventType: 'Split',
-                    impact: determineImpact(split.numerator / split.denominator),
-                    details: split
-                })),
-                // Process mergers
-                ...stockData.mergers.map((merger: any) => ({
-                    ticker: ticker.symbol,
-                    eventDate: new Date(merger.date),
-                    eventName: merger.title,
-                    eventType: 'M&A',
-                    impact: 'High',
-                    details: merger
-                }))
-            );
+    const stockList = responses
+      .flat()
+      .filter((stock: any) => {
+        if (!stock.symbol || !stock.currency) {
+          console.log('Skipping stock with missing data:', stock);
+          return false;
         }
+        // Ensure the symbol is exactly one of our popular stocks
+        return POPULAR_STOCKS.includes(stock.symbol);
+      })
+      .map((stock: any): Stock => ({
+        symbol: stock.symbol,
+        name: stock.name || stock.symbol,
+        currency: stock.currency.toUpperCase().trim(), // normalize currency
+      }));
 
-        return events;
-    });
+    console.log('Fetched stock list:', stockList);
+    return stockList;
+  } catch (error: any) {
+    console.error(`Error fetching stock list: ${error.response?.status} - ${error.message}`);
+    return [];
+  }
+}
+
+// Parse the CSV file and extract the data
+async function parseCSV(filePath: string): Promise<any[]> {
+  const results: any[] = [];
+  return new Promise((resolve, reject) => {
+    fs.createReadStream(filePath)
+      .pipe(csvParser())
+      .on('data', (data) => {
+        // Skip rows that are completely empty
+        if (Object.values(data).every(value => value === '')) {
+          return;
+        }
+        results.push(data);
+      })
+      .on('end', () => resolve(results))
+      .on('error', (error: Error) => reject(error));
+  });
+}
+
+// Process economic events for a given stock by matching the stock's currency with the event's country
+function processEconomicEventsForStock(stock: Stock, economicEvents: any[]): any[] {
+  console.log(`Processing events for stock: ${stock.symbol} with currency: ${stock.currency}`);
+  
+  if (!Array.isArray(economicEvents)) {
+    console.error('Economic events is not an array:', economicEvents);
+    return [];
+  }
+  
+  const matchedEvents = economicEvents
+    .filter((event: any) => {
+      if (!event || !event.Country || !stock.currency) {
+        console.log(`Skipping event due to missing country/currency:`, event);
+        return false;
+      }
+      // Compare normalized (uppercase and trimmed) values
+      const isMatch = event.Country.toUpperCase().trim() === stock.currency;
+      return isMatch;
+    })
+    .map((event: any) => {
+      try {
+        if (!event.Date) {
+          console.error('Missing date in event:', event);
+          return null;
+        }
+        
+        // Parse the event date (ensure the date is valid)
+        const parsedDate = parse(event.Date, 'MM-dd-yyyy', new Date());
+        if (isNaN(parsedDate.getTime())) {
+          console.error('Invalid date in event:', event.Date, 'for event:', event.Title);
+          return null;
+        }
+        
+        return {
+          ticker: stock.symbol,
+          eventDate: parsedDate,
+          eventName: event.Title || 'Unnamed Event',
+          eventType: 'Economic',
+          impact: event.Impact || 'Unknown',
+          details: JSON.stringify(event), // Convert to string to avoid nested object issues
+        };
+      } catch (error) {
+        console.error(`Error processing event:`, error, event);
+        return null;
+      }
+    })
+    .filter(event => event !== null); // filter out any null events from failed parsing
+
+  console.log(`Processed ${matchedEvents.length} events for ${stock.symbol}`);
+  return matchedEvents;
 }
 
 // Upsert events into the database
-async function storeEvents(events: any[]) {
-    await Promise.all(
-        events.map((event) =>
-            prisma.tickerEvent.upsert({
-                where: { ticker_eventDate: { ticker: event.ticker, eventDate: event.eventDate } },
-                update: {
-                    eventName: event.eventName,
-                    eventType: event.eventType,
-                    impact: event.impact,
-                    details: event.details,
-                    cleanImpliedVol: event.cleanImpliedVol,
-                    dirtyVolume: event.dirtyVolume,
-                    totalImpliedVol: event.totalImpliedVol,
-                    vol: event.vol
-                },
-                create: {
-                    ticker: event.ticker,
-                    eventDate: event.eventDate,
-                    eventName: event.eventName,
-                    eventType: event.eventType,
-                    impact: event.impact,
-                    details: event.details,
-                    cleanImpliedVol: event.cleanImpliedVol,
-                    dirtyVolume: event.dirtyVolume,
-                    totalImpliedVol: event.totalImpliedVol,
-                    vol: event.vol
-                },
-            })
-        )
-    );
-}
+async function storeEvents(events: any[]): Promise<void> {
+  if (!Array.isArray(events)) {
+    console.error('Invalid events data (not an array):', events);
+    return;
+  }
 
-// Main function to fetch data from external APIs and store into the DB
-async function fetchAndStoreEvents() {
-    try {
-        const tickers = await fetchTickers();
-        if (!tickers.length) {
-            console.warn('No tickers retrieved. Skipping event fetching.');
-            return;
-        }
+  if (events.length === 0) {
+    console.log('No events to store.');
+    return;
+  }
 
-        const [economicEvents, allStockEvents] = await Promise.all([
-            fetchEconomicEvents(),
-            fetchAllStockEvents(tickers),
-        ]);
-
-        const processedEvents = processEvents(tickers, economicEvents, allStockEvents);
-        await storeEvents(processedEvents);
-        console.log('Events successfully stored in the database.');
-    } catch (error) {
-        console.error('Error in fetchAndStoreEvents:', error);
-        throw error;
+  const validEvents = events.filter(event => {
+    if (!event) {
+      console.error('Null or undefined event found');
+      return false;
     }
+    if (typeof event !== 'object') {
+      console.error('Invalid event data (not an object):', event);
+      return false;
+    }
+    if (!event.ticker || !event.eventDate || !event.eventName) {
+      console.error('Missing required fields in event:', JSON.stringify(event));
+      return false;
+    }
+    if (isNaN(new Date(event.eventDate).getTime())) {
+      console.error('Invalid event date for event:', JSON.stringify(event));
+      return false;
+    }
+    return true;
+  });
+
+  console.log(`Found ${validEvents.length} valid events out of ${events.length} total`);
+
+  try {
+    for (const event of validEvents) {
+      // First check if the record exists
+      const existingRecord = await prisma.tickerEvent.findFirst({
+        where: {
+          ticker: String(event.ticker),
+          eventDate: new Date(event.eventDate)
+        }
+      });
+
+      const processedEvent = {
+        ticker: String(event.ticker),
+        eventDate: new Date(event.eventDate),
+        eventName: String(event.eventName),
+        eventType: String(event.eventType || 'Economic'),
+        impact: String(event.impact || 'Unknown'),
+        details: typeof event.details === 'string' ? event.details : JSON.stringify(event.details),
+      };
+
+      if (existingRecord) {
+        // Update existing record
+        await prisma.tickerEvent.update({
+          where: { id: existingRecord.id },
+          data: processedEvent
+        });
+      } else {
+        // Create new record
+        await prisma.tickerEvent.create({
+          data: processedEvent
+        });
+      }
+    }
+    console.log(`Stored ${validEvents.length} events successfully.`);
+  } catch (error: any) {
+    console.error('Error storing events:', error.message);
+    console.error('Stack trace:', error.stack);
+  }
 }
 
-// -------------------- API Route Handlers --------------------
+// Weekly update: fetch and store events for popular stocks
+async function weeklyUpdate(): Promise<void> {
+  try {
+    const stockList = await fetchStockList();
+    if (stockList.length === 0) {
+      console.warn('No stocks fetched. Weekly update aborted.');
+      return;
+    }
+    
+    const filePath = path.join(process.cwd(), 'public', 'economic_calendar.csv');
+    
+    if (!fs.existsSync(filePath)) {
+      console.error(`CSV file not found at path: ${filePath}`);
+      return;
+    }
+    
+    const economicEvents = await parseCSV(filePath);
+    
+    if (economicEvents.length === 0) {
+      console.warn('No economic events parsed. Weekly update aborted.');
+      return;
+    }
+    
+    console.log(`Parsed ${economicEvents.length} economic events`);
+
+    let allEvents: any[] = [];
+    for (const stock of stockList) {
+      const stockEvents = processEconomicEventsForStock(stock, economicEvents);
+      console.log(`Found ${stockEvents.length} events for ${stock.symbol}`);
+      allEvents = [...allEvents, ...stockEvents];
+    }
+    
+    if (allEvents.length === 0) {
+      console.log('No events to store after processing.');
+      return;
+    }
+    
+    await storeEvents(allEvents);
+    console.log('Weekly update completed successfully.');
+  } catch (error: any) {
+    console.error(`Error in weekly update: ${error.message}`);
+    console.error('Stack trace:', error.stack);
+  }
+}
 
 // GET: Retrieve ticker events (optionally filtered by a query parameter ?ticker=...)
 export async function GET(req: Request) {
-    try {
-        const { searchParams } = new URL(req.url);
-        const ticker = searchParams.get('ticker');
+  try {
+    const { searchParams } = new URL(req.url);
+    const ticker = searchParams.get('ticker');
 
-        const events = ticker
-            ? await prisma.tickerEvent.findMany({ where: { ticker } })
-            : await prisma.tickerEvent.findMany();
-
-        return NextResponse.json({ events });
-    } catch (error) {
-        console.error('Error retrieving ticker events:', error);
-        return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+    if (ticker) {
+      const events = await prisma.tickerEvent.findMany({ where: { ticker } });
+      return events.length
+        ? NextResponse.json({ events })
+        : NextResponse.json({ events: await fetchAndStoreEventsForStock(ticker) });
+    } else {
+      return NextResponse.json({ events: await prisma.tickerEvent.findMany() });
     }
+  } catch (error: any) {
+    console.error('GET API error:', error.message);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
 }
 
-// POST: Trigger fetching/upserting events from external APIs
+// POST: Trigger weekly fetching/upserting of events for popular stocks
 export async function POST(req: Request) {
-    try {
-        await fetchAndStoreEvents();
-        return NextResponse.json({ message: 'Events fetched and stored successfully.' });
-    } catch (error) {
-        console.error('Error in POST fetchAndStoreEvents:', error);
-        return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  try {
+    await weeklyUpdate();
+    return NextResponse.json({ message: 'Weekly popular stocks events update completed successfully.' });
+  } catch (error: any) {
+    console.error('POST API error:', error.message);
+    console.error('Stack trace:', error.stack);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+// Helper function to fetch and store events for a specific stock
+async function fetchAndStoreEventsForStock(tickerSymbol: string): Promise<any[]> {
+  try {
+    const stockList = await fetchStockList();
+    const stockInfo = stockList.find((stock) => stock.symbol === tickerSymbol);
+
+    if (!stockInfo) {
+      console.log(`Stock ${tickerSymbol} not found.`);
+      return [];
     }
+
+    const filePath = path.join(process.cwd(), 'public', 'economic_calendar.csv');
+    if (!fs.existsSync(filePath)) {
+      console.error(`CSV file not found at path: ${filePath}`);
+      return [];
+    }
+    
+    const economicEvents = await parseCSV(filePath);
+    if (economicEvents.length === 0) {
+      console.log(`No economic events found for ${tickerSymbol}.`);
+      return [];
+    }
+    
+    const events = processEconomicEventsForStock(stockInfo, economicEvents);
+    if (events.length === 0) {
+      console.log(`No matching events found for ${tickerSymbol}.`);
+      return [];
+    }
+
+    await storeEvents(events);
+    console.log(`Fetched and stored events for ${tickerSymbol}.`);
+    return events;
+  } catch (error: any) {
+    console.error(`Error fetching events for ${tickerSymbol}: ${error.message}`);
+    console.error('Stack trace:', error.stack);
+    return [];
+  }
 }
