@@ -150,14 +150,14 @@ const AdminPage = () => {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Event</DialogTitle>
-            <DialogDescription>Update the volume metrics for this event.</DialogDescription>
+            <DialogDescription>Update the volatility metrics for this event.</DialogDescription>
           </DialogHeader>
           {formData && (
             <div className="grid gap-4 py-4">
               <div className="grid grid-cols-4 gap-4">
                 <div className="col-span-4">
                   <label htmlFor="totalImpliedVol" className="text-sm font-medium">
-                    Total Implied Volume
+                    Total Implied Volatility
                   </label>
                   <Input
                     id="totalImpliedVol"
@@ -173,7 +173,7 @@ const AdminPage = () => {
                 </div>
                 <div className="col-span-4">
                   <label htmlFor="cleanImpliedVol" className="text-sm font-medium">
-                    Clean Implied Volume
+                    Clean Implied Volatility
                   </label>
                   <Input
                     id="cleanImpliedVol"
@@ -189,7 +189,7 @@ const AdminPage = () => {
                 </div>
                 <div className="col-span-4">
                   <label htmlFor="dirtyVolume" className="text-sm font-medium">
-                    Dirty Volume
+                    Dirty Volatility
                   </label>
                   <Input
                     id="dirtyVolume"
@@ -205,7 +205,7 @@ const AdminPage = () => {
                 </div>
                 <div className="col-span-4">
                   <label htmlFor="vol" className="text-sm font-medium">
-                    Volume
+                    Volatility
                   </label>
                   <Input
                     id="vol"
